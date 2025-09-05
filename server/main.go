@@ -79,7 +79,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		var msg Message
+		var msg map[string]interface{}
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
 			log.Printf("Error parsing message: %v", err)
 			continue
@@ -89,12 +89,20 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleMessage(client *Client, msg Message) {
+func handleMessage(client *Client, msg map[string]interface{}) {
 	log.Printf("Received message from %s: %+v", client.username, msg)
 
-	switch msg.Type {
+	msgType, ok := msg["type"].(string)
+	if !ok {
+		log.Printf("Invalid message type")
+		return
+	}
+
+	switch msgType {
 	case "join_waiting":
-		client.username = msg.Username
+		if username, ok := msg["Username"].(string); ok {
+			client.username = username
+		}
 		log.Printf("Processing join_waiting for user: %s", client.username)
 		joinWaitingRoom(client)
 	case "leave_waiting":
@@ -109,7 +117,7 @@ func handleMessage(client *Client, msg Message) {
 	case "end_call":
 		endCall(client)
 	default:
-		log.Printf("Unknown message type: %s", msg.Type)
+		log.Printf("Unknown message type: %s", msgType)
 	}
 }
 
@@ -174,15 +182,17 @@ func tryMatchUsers() {
 		user2.matched = true
 
 		// Notify both users they are matched
-		matchMsg := Message{Type: "matched", RoomID: roomID}
-		sendMessage(user1.conn, matchMsg)
-		sendMessage(user2.conn, matchMsg)
+		// First user becomes the caller
+		matchMsg1 := Message{Type: "matched", RoomID: roomID, Data: "caller"}
+		matchMsg2 := Message{Type: "matched", RoomID: roomID, Data: "answerer"}
+		sendMessage(user1.conn, matchMsg1)
+		sendMessage(user2.conn, matchMsg2)
 
 		log.Printf("Matched users %s and %s in room %s", user1.username, user2.username, roomID)
 	}
 }
 
-func forwardToRoomPartner(client *Client, msg Message) {
+func forwardToRoomPartner(client *Client, msg map[string]interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 
@@ -198,7 +208,15 @@ func forwardToRoomPartner(client *Client, msg Message) {
 	// Find the partner
 	for _, roomClient := range room.Clients {
 		if roomClient != client {
-			sendMessage(roomClient.conn, msg)
+			// Forward the message as-is to preserve SDP and ICE candidate structure
+			msgBytes, err := json.Marshal(msg)
+			if err != nil {
+				log.Printf("Error marshaling forwarded message: %v", err)
+				return
+			}
+			if err := roomClient.conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+				log.Printf("Error forwarding message: %v", err)
+			}
 			break
 		}
 	}
